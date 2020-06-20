@@ -87,27 +87,31 @@ int RTMPClient::OpenInput(std::string in_filename,
   int video_frame_size = 0;
   int audio_frame_count = 0;
   int audio_frame_size = 0;
+  int frame_index = 0;
   while (1) {
     if (av_read_frame(ifmt_ctx, av_packet) < 0) {
       cout << "read frame end" << endl;
       break;
     }
     istream = ifmt_ctx->streams[av_packet->stream_index];
-    cout << "pts" << av_packet->pts << endl;
-    // calc timebase
-    AVRational itime = ifmt_ctx->streams[av_packet->stream_index]->time_base;
-    AVRational otime = ofmt_ctx->streams[av_packet->stream_index]->time_base;
-    av_packet->pts = av_rescale_q_rnd(
-        av_packet->pts, itime, otime,
-        (AVRounding)(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
-    av_packet->dts = av_rescale_q_rnd(
-        av_packet->pts, itime, otime,
-        (AVRounding)(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
-    av_packet->duration = av_rescale_q(av_packet->duration, itime, otime);
-    av_packet->pos = -1;
+
+    // 没有封装格式的裸流（例如H.264裸流）是不包含PTS、DTS这些参数的。在发送这种数据的时候，需要自己计算并写入AVPacket的PTS，DTS，duration等参数
+    if (av_packet->pts == AV_NOPTS_VALUE) {
+      //write PTS
+      AVRational timebase = ifmt_ctx->streams[video_index]->time_base;
+      int64_t calc_duration =
+          (double)AV_TIME_BASE /
+          av_q2d(ifmt_ctx->streams[video_index]->r_frame_rate);
+      av_packet->pts = (double)(frame_index * calc_duration) /
+                       (double)(av_q2d(timebase) * AV_TIME_BASE);
+      av_packet->dts = av_packet->pts;
+      av_packet->duration =
+          (double)calc_duration / (double)(av_q2d(timebase) * AV_TIME_BASE);
+    }
 
     if (av_packet->stream_index == video_index) {
       video_frame_size += av_packet->size;
+      frame_index++;
       cout << "[VIDEO] recv " << ++video_frame_count << " frame "
            << av_packet->size << " - " << video_frame_size
            << " pts:" << av_packet->pts << endl;
@@ -121,16 +125,21 @@ int RTMPClient::OpenInput(std::string in_filename,
     }
 
     if (istream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-      AVRational time_base=ifmt_ctx->streams[video_index]->time_base;
-			AVRational time_base_q={1,AV_TIME_BASE};
-      int64_t dts = av_rescale_q(av_packet->dts, time_base, time_base_q);
+      AVRational dst_time_base = {1, AV_TIME_BASE};
+      int64_t pts =
+          av_rescale_q(av_packet->pts, istream->time_base, dst_time_base);
       int64_t now = av_gettime() - start_time;
-      cout << "now:" << now << " dts:" << dts << endl;
-      if (dts > now) {
-        cout << "sleep:" << (dts - now);
-        av_usleep(dts - now);
+      cout << "now:" << now << " pts:" << pts << endl;
+      if (pts > now) {
+        cout << "sleep:" << (pts - now) << endl;
+        av_usleep(pts - now);
       }
     }
+
+    av_packet->pts = av_rescale_q_rnd(av_packet->pts, istream->time_base, ostream->time_base, (AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+		av_packet->dts = av_rescale_q_rnd(av_packet->dts, istream->time_base, ostream->time_base, (AVRounding)(AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+		av_packet->duration = av_rescale_q(av_packet->duration, istream->time_base, ostream->time_base);
+    av_packet->pos = -1;
 
     if (av_interleaved_write_frame(ofmt_ctx, av_packet) < 0) {
       cout << "av_interleaved_write_frame failed" << endl;
