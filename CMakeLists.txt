@@ -24,4 +24,5 @@ ADD_DEFINITIONS("-std=c++11")
 
 ADD_DEFINITIONS("-g -DDEBUG")
 
+add_subdirectory(utils)
 add_subdirectory(src)
